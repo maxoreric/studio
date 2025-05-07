@@ -1,3 +1,4 @@
+
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
@@ -21,9 +22,8 @@ export function ChatInterface() {
   const [newMessage, setNewMessage] = useState('');
   const scrollAreaRef = useRef<HTMLDivElement>(null);
 
-  // Mock users for demo
+  // Mock user for demo
   const currentUser = "You";
-  const otherUser = "Friend";
 
   const handleSendMessage = (e: React.FormEvent) => {
     e.preventDefault();
@@ -38,18 +38,6 @@ export function ChatInterface() {
     };
     setMessages((prevMessages) => [...prevMessages, message]);
     setNewMessage('');
-
-    // Simulate a reply for demo purposes
-    setTimeout(() => {
-      const replyMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        user: otherUser,
-        text: `Echo: ${message.text}`,
-        timestamp: new Date(),
-        avatar: 'https://picsum.photos/seed/friend/40/40',
-      };
-      setMessages((prevMessages) => [...prevMessages, replyMessage]);
-    }, 1000);
   };
 
   useEffect(() => {
@@ -77,6 +65,7 @@ export function ChatInterface() {
                   msg.user === currentUser ? 'justify-end' : ''
                 }`}
               >
+                {/* Avatar for other users - will not be shown with current logic but kept for future multi-user implementation */}
                 {msg.user !== currentUser && (
                   <Avatar className="h-8 w-8">
                     <AvatarImage src={msg.avatar} alt={msg.user} data-ai-hint="profile avatar" />
@@ -87,7 +76,7 @@ export function ChatInterface() {
                   className={`max-w-[70%] p-3 rounded-lg ${
                     msg.user === currentUser
                       ? 'bg-primary text-primary-foreground'
-                      : 'bg-muted text-muted-foreground'
+                      : 'bg-muted text-muted-foreground' // This style will not be applied with current logic
                   }`}
                 >
                   <p className="text-sm">{msg.text}</p>
