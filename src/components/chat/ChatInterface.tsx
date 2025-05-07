@@ -77,43 +77,27 @@ export function ChatInterface() {
   useEffect(() => {
     // Cleanup object URLs for messages
     // This is important to prevent memory leaks from blob URLs
-    const urlsToRevoke = messages
+    // This effect attempts to revoke URLs for messages that might be removed or when the component unmounts.
+    // A more robust strategy might involve tracking active blob URLs and revoking them when they are no longer needed.
+
+    // Collect all current blob URLs from messages
+    const currentMessageBlobUrls = messages
       .filter(msg => msg.type === 'audio' && msg.audioUrl && msg.audioUrl.startsWith('blob:'))
       .map(msg => msg.audioUrl!);
 
-    // Also include recordedAudioUrl if it's a blob URL and not part of any message yet
-    if (recordedAudioUrl && recordedAudioUrl.startsWith('blob:') && !messages.some(msg => msg.audioUrl === recordedAudioUrl)) {
-      // This case is tricky: recordedAudioUrl is transient. If it's not in messages, it's likely for preview.
-      // It will be revoked by handleDiscardAudio or when a new recording starts.
-      // The primary cleanup for persistent blobs should be for those in the `messages` array.
-    }
-
     return () => {
-      // This cleanup runs when the component unmounts or `messages` array changes in a way that removes items.
-      // However, Array.prototype.filter().map() in useEffect dependency array might not work as expected for deep changes.
-      // A more robust cleanup for removed messages would involve comparing previous and current messages.
-      // For now, this will revoke URLs of messages that *are currently* in the list when component unmounts.
-      // When a message is *removed* from the list, its URL should ideally be revoked.
-      // The current logic is: when a message is added, its audioUrl is a new blob.
-      // Revoking only on unmount means blobs for messages that are *not* removed from the list during session persist.
-      // This is generally fine as they are needed.
-      // The main concern is blobs that are created and then discarded *before* being added to messages (like `recordedAudioUrl`).
-
-      // This will revoke all current message audio URLs on unmount.
-      // urlsToRevoke.forEach(url => URL.revokeObjectURL(url));
-
-      // A better approach for cleaning up `recordedAudioUrl` specifically:
+      // On unmount, revoke all blob URLs associated with messages
+      currentMessageBlobUrls.forEach(url => URL.revokeObjectURL(url));
+      
+      // Also, handle the transient recordedAudioUrl if it hasn't been sent and is a blob URL
       if (recordedAudioUrl && recordedAudioUrl.startsWith('blob:')) {
-        // If recordedAudioUrl is not found in any of the current messages, it means it was a preview
-        // that was never sent. It should be revoked when the component unmounts if not already handled.
-        // This is more of a safeguard.
         const isRecordedUrlInMessages = messages.some(msg => msg.audioUrl === recordedAudioUrl);
         if (!isRecordedUrlInMessages) {
-          // URL.revokeObjectURL(recordedAudioUrl); // This might be too aggressive if it's still being used for preview
+          URL.revokeObjectURL(recordedAudioUrl);
         }
       }
     };
-  }, [messages, recordedAudioUrl]); // dependencies ensure this runs when these change
+  }, [messages, recordedAudioUrl]); 
 
 
   const handleSendTextMessage = (e: FormEvent) => {
@@ -136,7 +120,7 @@ export function ChatInterface() {
     // Revoke previous recording URL if it exists and wasn't sent
     if (recordedAudioUrl) {
         const isSent = messages.some(msg => msg.audioUrl === recordedAudioUrl);
-        if (!isSent) {
+        if (!isSent && recordedAudioUrl.startsWith('blob:')) { // Ensure it's a blob URL before revoking
             URL.revokeObjectURL(recordedAudioUrl);
         }
         setRecordedAudioUrl(null);
@@ -145,17 +129,31 @@ export function ChatInterface() {
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      mediaRecorderRef.current = new MediaRecorder(stream, { mimeType: 'audio/webm; codecs=opus' });
+      // Attempt to use 'audio/webm; codecs=opus' for better quality and compression, fallback if not supported.
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm; codecs=opus') 
+                         ? 'audio/webm; codecs=opus' 
+                         : MediaRecorder.isTypeSupported('audio/webm') 
+                           ? 'audio/webm'
+                           : 'audio/ogg; codecs=opus'; // Add more fallbacks if needed
+
+      if (!MediaRecorder.isTypeSupported(mimeType) && mimeType === 'audio/ogg; codecs=opus' && !MediaRecorder.isTypeSupported('audio/ogg')) {
+         // Final fallback if even basic ogg isn't supported or opus within ogg.
+         // Depending on browser, 'audio/wav' might be a very safe but large fallback.
+         // For simplicity, this example will proceed and let the browser decide or error out if no suitable mimeType is found.
+         console.warn("Preferred MIME types not supported, using browser default or potentially failing.");
+      }
+
+
+      mediaRecorderRef.current = new MediaRecorder(stream, { mimeType });
       
       mediaRecorderRef.current.ondataavailable = (event) => {
-        if (event.data.size > 0) { // ensure there's data
+        if (event.data.size > 0) { 
           setAudioChunks((prev) => [...prev, event.data]);
         }
       };
 
       mediaRecorderRef.current.onstop = () => {
         stream.getTracks().forEach(track => track.stop()); 
-        // Blob creation moved to useEffect on audioChunks changing
       };
       
       mediaRecorderRef.current.start();
@@ -167,7 +165,7 @@ export function ChatInterface() {
       console.error("Error accessing microphone:", err);
       toast({
         title: "Microphone Error",
-        description: "Could not access microphone. Please check permissions.",
+        description: `Could not access microphone. Please check permissions. Error: ${(err as Error).message}`,
         variant: "destructive",
       });
     }
@@ -177,19 +175,15 @@ export function ChatInterface() {
     if (mediaRecorderRef.current && isRecording) {
       mediaRecorderRef.current.stop();
       setIsRecording(false);
-      // onstop will trigger ondataavailable, then useEffect on audioChunks will process
     }
   };
 
   useEffect(() => {
-    // This effect processes the audio chunks after recording stops
     if (!isRecording && audioChunks.length > 0) {
-      const audioBlob = new Blob(audioChunks, { type: 'audio/webm; codecs=opus' });
+      const mimeType = mediaRecorderRef.current?.mimeType || 'audio/webm'; // Default or detected mimeType
+      const audioBlob = new Blob(audioChunks, { type: mimeType });
       const newAudioUrl = URL.createObjectURL(audioBlob);
       setRecordedAudioUrl(newAudioUrl);
-      // Don't clear audioChunks here if you might need them for sending the blob later.
-      // If handleSendAudioMessage creates a new Blob from these chunks, it's fine.
-      // If handleSendAudioMessage relies on recordedAudioUrl which points to this blob, also fine.
       toast({ title: "Recording stopped", description: "Preview or send your voice message." });
     }
   }, [isRecording, audioChunks, toast]);
@@ -199,18 +193,13 @@ export function ChatInterface() {
     if (isRecording) {
       stopRecording();
     } else {
-      // No need to explicitly setRecordedAudioUrl(null) here, startRecording handles revoking old preview
       startRecording();
     }
   };
 
   const handleSendAudioMessage = () => {
     if (!recordedAudioUrl || audioChunks.length === 0) {
-        // If recordedAudioUrl exists but chunks are empty, it implies an issue or an old URL.
-        // This primarily safeguards against sending an empty/invalid audio.
         if (recordedAudioUrl && audioChunks.length === 0){
-             // This might happen if the state updates are not perfectly synced.
-             // Try to create blob from recordedAudioUrl if it's a blob url
              console.warn("Attempting to send audio with no new chunks, using existing recordedAudioUrl if valid.");
         } else {
             toast({ title: "Cannot send audio", description: "No audio recorded or an error occurred.", variant: "destructive" });
@@ -218,43 +207,44 @@ export function ChatInterface() {
         }
     }
     
-    // It's crucial that the audioUrl for the message is a *stable* blob URL.
-    // recordedAudioUrl is fine as long as it's not revoked prematurely.
-    // The useEffect cleanup for messages should handle revoking these URLs when messages are removed or component unmounts.
-
+    const mimeType = mediaRecorderRef.current?.mimeType || 'audio/webm'; // Use the mimeType from the recorder
     const message: Message = {
       id: Date.now().toString(),
       user: currentUser,
       timestamp: new Date(),
       avatar: 'https://picsum.photos/seed/userAudio/40/40',
       type: 'audio',
-      audioUrl: recordedAudioUrl, // Assign current blob URL
-      audioMimeType: 'audio/webm',
+      audioUrl: recordedAudioUrl, 
+      audioMimeType: mimeType,
     };
     setMessages((prevMessages) => [...prevMessages, message]);
     
-    // Reset for next recording
-    setRecordedAudioUrl(null); // The URL is now "owned" by the message in the list
-    setAudioChunks([]); // Clear chunks as they've been processed into the blob for the sent message
+    setRecordedAudioUrl(null); 
+    setAudioChunks([]); 
     setRecordingDuration(0);
   };
 
   const handleDiscardAudio = () => {
     if (recordedAudioUrl) {
       const isSent = messages.some(msg => msg.audioUrl === recordedAudioUrl);
-      if (!isSent) { // Only revoke if it wasn't sent
+      if (!isSent && recordedAudioUrl.startsWith('blob:')) { 
           URL.revokeObjectURL(recordedAudioUrl);
       }
     }
     setRecordedAudioUrl(null);
-    setAudioChunks([]); // Clear chunks
-    if (isRecording) { // If discard is called while recording (e.g. by an error or external action)
-        mediaRecorderRef.current?.stop(); // Stop recorder
+    setAudioChunks([]); 
+    if (isRecording) { 
+        mediaRecorderRef.current?.stop(); 
         setIsRecording(false);
     }
     setRecordingDuration(0);
-    if (mediaRecorderRef.current && mediaRecorderRef.current.stream && mediaRecorderRef.current.stream.getTracks().some(track => track.readyState === 'live')) {
-        mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
+    // Ensure any active media stream tracks are stopped
+    if (mediaRecorderRef.current && mediaRecorderRef.current.stream) {
+       mediaRecorderRef.current.stream.getTracks().forEach(track => {
+        if (track.readyState === 'live') {
+          track.stop();
+        }
+      });
     }
     toast({ title: "Recording discarded" });
   };
@@ -264,10 +254,11 @@ export function ChatInterface() {
       toast({ title: "No messages", description: "There are no messages to export." });
       return;
     }
-    // Create a deep copy and convert Date objects to ISO strings for consistent JSON
     const serializableMessages = messages.map(msg => ({
       ...msg,
       timestamp: msg.timestamp.toISOString(),
+      // For audio messages, we'll keep the blob URL. User needs to be informed that blobs are session-specific.
+      // Or, ideally, audio would be uploaded to a server and a permanent URL would be stored.
     }));
 
     const chatData = JSON.stringify(serializableMessages, null, 2);
@@ -280,20 +271,26 @@ export function ChatInterface() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-    toast({ title: "Chat History Exported", description: "Downloaded as chat-history.json. Audio file URLs are included but may need individual saving if blobs are no longer valid." });
+    toast({ 
+        title: "Chat History Exported", 
+        description: "Downloaded as chat-history.json. Audio messages contain local Blob URLs which may not be valid long-term or across sessions." 
+    });
   };
 
   const handleDownloadAudio = (audioUrl: string, fileName: string) => {
-    if (!audioUrl) return;
+    if (!audioUrl || !audioUrl.startsWith('blob:')) { // Only allow downloading blob URLs for safety
+        toast({ title: "Download Error", description: "Invalid audio source for download.", variant: "destructive"});
+        return;
+    }
     const a = document.createElement('a');
     a.href = audioUrl;
     a.download = fileName;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    // The audioUrl is a blob URL managed by the `messages` state.
-    // It will be revoked by the useEffect cleanup when the message is removed or component unmounts.
-    // Do not revoke here as it might still be in use by the AudioPlayer.
+    // Do not revoke here, the AudioPlayer might still be using it.
+    // It will be revoked when the message is removed or component unmounts by the main useEffect.
+    toast({ title: "Audio Downloaded", description: `${fileName} saved.` });
   };
 
   const renderFooterContent = () => {
@@ -313,7 +310,7 @@ export function ChatInterface() {
     if (recordedAudioUrl) {
       return (
         <div className="flex flex-col items-center gap-2 w-full">
-          <AudioPlayer src={recordedAudioUrl} mimeType="audio/webm" />
+          <AudioPlayer src={recordedAudioUrl} mimeType={mediaRecorderRef.current?.mimeType || 'audio/webm'} />
           <div className="flex gap-2">
             <Button onClick={handleSendAudioMessage} size="sm" aria-label="Send voice message">
               <SendHorizonal className="h-4 w-4 mr-2" /> Send Voice
@@ -381,18 +378,18 @@ export function ChatInterface() {
                 >
                   {msg.type === 'text' && <p className="text-sm break-words">{msg.text}</p>}
                   {msg.type === 'audio' && msg.audioUrl && (
-                    <div className="flex flex-col items-start gap-1"> {/* Added gap-1 */}
+                    <div className="flex flex-col items-start gap-1">
                       <AudioPlayer src={msg.audioUrl} mimeType={msg.audioMimeType} />
                       <Button
                         variant="link" 
                         size="sm"
-                        className={`p-1 h-auto self-start text-xs ${ // text-xs for smaller text
+                        className={`p-1 h-auto self-start text-xs ${
                           msg.user === currentUser ? 'text-primary-foreground/80 hover:text-primary-foreground focus:text-primary-foreground' : 'text-muted-foreground/80 hover:text-muted-foreground focus:text-foreground'
                         }`}
-                        onClick={() => handleDownloadAudio(msg.audioUrl!, `voice-message-${msg.id}.webm`)}
+                        onClick={() => handleDownloadAudio(msg.audioUrl!, `voice-message-${msg.id}.${msg.audioMimeType?.split('/')[1]?.split(';')[0] || 'webm'}`)}
                         aria-label="Download audio message"
                       >
-                        <Download className="h-3 w-3 mr-1" /> {/* Smaller icon */}
+                        <Download className="h-3 w-3 mr-1" />
                         Save audio
                       </Button>
                     </div>
