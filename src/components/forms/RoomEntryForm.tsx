@@ -1,7 +1,7 @@
 'use client';
 
 import { zodResolver } from '@hookform/resolvers/zod';
-import { useFormState } from 'react-dom';
+import { useActionState, useEffect } from 'react'; // Changed from 'react-dom' and renamed useFormState
 import { useForm } from 'react-hook-form';
 import { z } from 'zod';
 import { Button } from '@/components/ui/button';
@@ -9,7 +9,6 @@ import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle }
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form';
 import { Input } from '@/components/ui/input';
 import { handleRoomEntry, type RoomEntryFormState } from '@/app/actions';
-import { useEffect } from 'react';
 import { useToast } from '@/hooks/use-toast';
 import { Loader2 } from 'lucide-react';
 
@@ -23,7 +22,7 @@ type RoomEntryFormData = z.infer<typeof roomEntrySchema>;
 export function RoomEntryForm() {
   const { toast } = useToast();
   
-  const [state, formAction] = useFormState<RoomEntryFormState | undefined, FormData>(handleRoomEntry, undefined);
+  const [state, formAction, isPending] = useActionState<RoomEntryFormState | undefined, FormData>(handleRoomEntry, undefined); // Updated to useActionState and added isPending
 
   const form = useForm<RoomEntryFormData>({
     resolver: zodResolver(roomEntrySchema),
@@ -50,7 +49,7 @@ export function RoomEntryForm() {
     }
   }, [state, toast]);
   
-  const {formState: {isSubmitting}} = form;
+  // const {formState: {isSubmitting}} = form; // isSubmitting is now isPending from useActionState
 
 
   return (
@@ -93,8 +92,8 @@ export function RoomEntryForm() {
             )}
           </CardContent>
           <CardFooter>
-            <Button type="submit" className="w-full" disabled={isSubmitting}>
-              {isSubmitting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+            <Button type="submit" className="w-full" disabled={isPending}>
+              {isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
               Enter Room
             </Button>
           </CardFooter>
@@ -103,3 +102,4 @@ export function RoomEntryForm() {
     </Card>
   );
 }
+
