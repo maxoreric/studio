@@ -1,6 +1,7 @@
+
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, use } from 'react';
 import { VideoPlayerWrapper } from '@/components/video/VideoPlayerWrapper';
 import { ChatInterface } from '@/components/chat/ChatInterface';
 import { VideoUpload } from '@/components/upload/VideoUpload';
@@ -9,11 +10,14 @@ import { Separator } from '@/components/ui/separator';
 import { LayoutGrid, MessageSquare } from 'lucide-react';
 
 interface RoomPageProps {
-  params: { roomId: string };
+  params: { roomId: string }; // This type might need to be Promise<{ roomId: string }> in future Next.js versions, but use() handles it
 }
 
 export default function RoomPage({ params }: RoomPageProps) {
-  const { roomId } = params;
+  // Unwrap params using React.use()
+  const resolvedParams = use(params);
+  const { roomId } = resolvedParams;
+
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [videoFileName, setVideoFileName] = useState<string | null>(null);
   const [mounted, setMounted] = useState(false);
@@ -71,3 +75,4 @@ export default function RoomPage({ params }: RoomPageProps) {
     </div>
   );
 }
+
