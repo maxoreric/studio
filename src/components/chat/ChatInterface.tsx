@@ -1,3 +1,4 @@
+
 'use client';
 
 import { useState, useRef, useEffect, type FormEvent } from 'react';
@@ -46,6 +47,10 @@ export function ChatInterface({ socket, roomId, username }: ChatInterfaceProps) 
 
   const currentUserSocketId = socket?.id; 
 
+  // Refs for managing blob URLs moved to top level
+  const previousBlobUrlsInMessagesRef = useRef<Set<string>>(new Set());
+  const previousRecordedAudioUrlRef = useRef<string | null>(null);
+
   const formatDuration = (seconds: number): string => {
     const minutes = Math.floor(seconds / 60);
     const remainingSeconds = Math.floor(seconds % 60);
@@ -82,8 +87,6 @@ export function ChatInterface({ socket, roomId, username }: ChatInterfaceProps) 
         .map(msg => msg.audioUrl!)
     );
 
-    const previousBlobUrlsInMessagesRef = useRef<Set<string>>(new Set());
-
     // Revoke URLs that were in previousBlobUrlsInMessagesRef.current but are not in newBlobUrlsInMessages
     previousBlobUrlsInMessagesRef.current.forEach(oldUrl => {
       if (!newBlobUrlsInMessages.has(oldUrl)) {
@@ -93,7 +96,6 @@ export function ChatInterface({ socket, roomId, username }: ChatInterfaceProps) 
     previousBlobUrlsInMessagesRef.current = newBlobUrlsInMessages;
 
     // Manage blob URL for recordedAudioUrl (preview)
-    const previousRecordedAudioUrlRef = useRef<string | null>(null);
     if (
       previousRecordedAudioUrlRef.current &&
       previousRecordedAudioUrlRef.current !== recordedAudioUrl && // It changed
@@ -312,6 +314,10 @@ export function ChatInterface({ socket, roomId, username }: ChatInterfaceProps) 
       type: msg.type,
       text: msg.text,
       audioMimeType: msg.type === 'audio' ? msg.audioMimeType : undefined,
+      // For export, we can't save the blob URL directly. Instead, we can save the Data URI if we had it.
+      // Since we convert DataURI to blob on receive, we don't have it readily available unless we re-fetch or store it.
+      // For now, let's just indicate audio was present and provide its mime type.
+      // A more robust solution would save the Data URI alongside the blob for export, or re-fetch blob to data URI.
       audioPresent: msg.type === 'audio' && !!msg.audioUrl 
     }));
 
@@ -327,7 +333,7 @@ export function ChatInterface({ socket, roomId, username }: ChatInterfaceProps) 
     URL.revokeObjectURL(url);
     toast({ 
         title: "Chat History Exported", 
-        description: `Downloaded. Voice messages are referenced by temporary IDs.` 
+        description: `Downloaded. Voice messages are referenced by temporary IDs and not included in this export.` 
     });
   };
 
@@ -417,7 +423,7 @@ export function ChatInterface({ socket, roomId, username }: ChatInterfaceProps) 
                   {msg.type === 'text' && <p className="text-sm break-words">{msg.text}</p>}
                   {msg.type === 'audio' && (
                     <div className="flex flex-col items-start gap-1">
-                      {msg.audioUrl && msg.audioUrl.startsWith('blob:') ? (
+                      {msg.audioUrl && (msg.audioUrl.startsWith('blob:') || msg.audioUrl.startsWith('data:')) ? (
                         <AudioPlayer src={msg.audioUrl} mimeType={msg.audioMimeType} />
                       ) : (
                         <p className="text-xs italic">Voice message (processing or error)</p>
@@ -452,3 +458,4 @@ export function ChatInterface({ socket, roomId, username }: ChatInterfaceProps) 
     </Card>
   );
 }
+
