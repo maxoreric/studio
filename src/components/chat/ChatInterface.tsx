@@ -155,7 +155,7 @@ export function ChatInterface({ socket, roomId, username }: ChatInterfaceProps) 
     return () => {
       socket.off('new_message', handleNewMessage);
     };
-  }, [socket, toast]);
+  }, [socket, toast, setMessages]); // Added setMessages
 
 
   const handleSendTextMessage = (e: FormEvent) => {
