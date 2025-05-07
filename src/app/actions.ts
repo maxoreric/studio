@@ -1,11 +1,12 @@
+
 'use server';
 
 import { redirect } from 'next/navigation';
 import { z } from 'zod';
 
 const RoomEntrySchema = z.object({
-  roomName: z.string().min(3, { message: 'Room name must be at least 3 characters.' }),
-  password: z.string().min(4, { message: 'Password must be at least 4 characters.' }),
+  roomName: z.string().min(1, { message: 'Room name is required.' }),
+  password: z.string().min(1, { message: 'Password is required.' }),
 });
 
 export interface RoomEntryFormState {
@@ -34,19 +35,16 @@ export async function handleRoomEntry(prevState: RoomEntryFormState | undefined,
 
   const { roomName } = validatedFields.data;
 
-  // In a real app, you'd validate room & password against a DB or state store.
-  // For now, we'll simulate success and redirect.
-  console.log('Attempting to enter room:', validatedFields.data);
-
-  // Simulate some server-side logic/delay
-  await new Promise(resolve => setTimeout(resolve, 500));
-
-  // On successful validation/creation:
+  // The actual room joining logic (password check, user limit) will be handled
+  // by the Socket.IO server when the client connects on the room page.
+  // This server action now primarily validates form input and triggers redirect.
+  // The password will be passed via client-side state (sessionStorage) to the room page.
+  
   redirect(`/room/${encodeURIComponent(roomName)}`);
 
-  //This part will not be reached due to redirect, but shows how to return success state
+  // This part is not reached due to redirect.
   return {
-    message: `Successfully joined room ${roomName}`,
+    message: `Proceeding to room ${roomName}. Password will be handled on the room page.`,
     success: true,
   };
 }

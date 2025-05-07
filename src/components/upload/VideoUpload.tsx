@@ -1,6 +1,7 @@
+
 'use client';
 
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -14,21 +15,36 @@ interface VideoUploadProps {
 
 export function VideoUpload({ onVideoSelect }: VideoUploadProps) {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null); // This is a blob URL
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { toast } = useToast();
+
+  // Clean up object URL when component unmounts or previewUrl changes and is no longer needed
+  useEffect(() => {
+    const currentPreviewUrl = previewUrl; // Capture current value for cleanup
+    return () => {
+      if (currentPreviewUrl) {
+        URL.revokeObjectURL(currentPreviewUrl);
+      }
+    };
+  }, [previewUrl]);
 
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (file) {
       if (file.type.startsWith('video/')) {
+        // Revoke previous URL if exists, before creating new one
+        if (previewUrl) {
+          URL.revokeObjectURL(previewUrl);
+        }
+
         setSelectedFile(file);
-        const url = URL.createObjectURL(file);
-        setPreviewUrl(url); // For local preview, if needed by player
-        onVideoSelect(url, file.name); 
+        const newPreviewUrl = URL.createObjectURL(file);
+        setPreviewUrl(newPreviewUrl); // Set the new blob URL for potential local preview
+        onVideoSelect(newPreviewUrl, file.name); // Pass blob URL and name to parent (RoomPage)
         toast({
           title: 'Video Selected',
-          description: `${file.name} is ready to play locally.`,
+          description: `${file.name} is ready. Host controls are active.`,
         });
       } else {
         toast({
@@ -36,24 +52,32 @@ export function VideoUpload({ onVideoSelect }: VideoUploadProps) {
           description: 'Please select a valid video file.',
           variant: 'destructive',
         });
+        // Clear previous selection if invalid file is chosen
+        if (previewUrl) URL.revokeObjectURL(previewUrl);
         setSelectedFile(null);
         setPreviewUrl(null);
         if (fileInputRef.current) {
-            fileInputRef.current.value = ""; // Reset file input
+            fileInputRef.current.value = ""; // Reset the file input so the same file can be re-selected after error
         }
+        onVideoSelect('', ''); // Clear in parent as well
       }
+    } else { // No file selected (e.g., user cancelled dialog)
+        // If a file was previously selected, and now it's unselected, clear it.
+        if (selectedFile) {
+            handleRemoveFile(); // Treat as removal
+        }
     }
   };
 
   const handleRemoveFile = () => {
-    setSelectedFile(null);
-    if (previewUrl) {
-      URL.revokeObjectURL(previewUrl); // Clean up object URL
+    if (previewUrl) { // previewUrl is always a blob URL here
+      URL.revokeObjectURL(previewUrl);
     }
+    setSelectedFile(null);
     setPreviewUrl(null);
     onVideoSelect('', ''); // Clear video in parent
     if (fileInputRef.current) {
-        fileInputRef.current.value = ""; // Reset file input
+        fileInputRef.current.value = ""; // Reset the file input
     }
      toast({
         title: 'Video Cleared',
@@ -61,14 +85,11 @@ export function VideoUpload({ onVideoSelect }: VideoUploadProps) {
       });
   };
   
-  // Note: Actual server upload logic is omitted as per requirements.
-  // In a real app, you'd call `uploadVideo(selectedFile)` here.
-
   return (
     <Card className="w-full shadow-lg">
       <CardHeader>
-        <CardTitle className="text-xl">Upload Video</CardTitle>
-        <CardDescription>Select a video file from your device.</CardDescription>
+        <CardTitle className="text-xl">Select Video (Host)</CardTitle>
+        <CardDescription>Choose a local video file. Other users will sync to your playback.</CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         {!selectedFile ? (
@@ -77,7 +98,7 @@ export function VideoUpload({ onVideoSelect }: VideoUploadProps) {
             <Label htmlFor="video-upload" className="cursor-pointer text-primary font-semibold hover:underline">
               Choose a video file
             </Label>
-            <p className="text-xs text-muted-foreground mt-1">MP4, WebM, Ogg up to 500MB</p>
+            <p className="text-xs text-muted-foreground mt-1">MP4, WebM, Ogg. This plays locally for you.</p>
             <Input
               id="video-upload"
               type="file"
@@ -91,9 +112,9 @@ export function VideoUpload({ onVideoSelect }: VideoUploadProps) {
         ) : (
           <div className="p-4 border rounded-lg bg-muted/50">
             <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Video className="w-6 h-6 text-primary" />
-                <span className="text-sm font-medium truncate max-w-[200px]">{selectedFile.name}</span>
+              <div className="flex items-center gap-2 min-w-0"> 
+                <Video className="w-6 h-6 text-primary flex-shrink-0" />
+                <span className="text-sm font-medium truncate" title={selectedFile.name}>{selectedFile.name}</span>
               </div>
               <Button variant="ghost" size="icon" onClick={handleRemoveFile} aria-label="Remove selected video">
                 <X className="w-5 h-5 text-destructive" />
@@ -104,17 +125,6 @@ export function VideoUpload({ onVideoSelect }: VideoUploadProps) {
             </p>
           </div>
         )}
-        {/* Example of "Upload to Server" button - currently non-functional */}
-        {/* {selectedFile && (
-          <Button 
-            onClick={() => alert('Server upload not implemented in this demo.')} 
-            className="w-full mt-2"
-            disabled={!selectedFile}
-          >
-            <UploadCloud className="mr-2 h-4 w-4" />
-            Upload to Server (Demo)
-          </Button>
-        )} */}
       </CardContent>
     </Card>
   );
