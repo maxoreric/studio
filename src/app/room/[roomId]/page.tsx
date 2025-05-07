@@ -9,7 +9,7 @@ import { ChatInterface } from '@/components/chat/ChatInterface';
 import { VideoUpload } from '@/components/upload/VideoUpload';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
-import { LayoutGrid, Users, Crown, Loader2, LogOut } from 'lucide-react';
+import { LayoutGrid, Users, Crown, Loader2, LogOut, AlertTriangle } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -21,12 +21,12 @@ interface RoomPageProps {
 }
 
 interface User {
-  id?: string; 
+  id?: string; // socket.id from server
   username: string;
 }
 
 export default function RoomPage({ params }: RoomPageProps) {
-  const resolvedParams = use(params);
+  const resolvedParams = use(params); // Resolve params promise
   const { roomId: encodedRoomId } = resolvedParams;
   const roomId = decodeURIComponent(encodedRoomId);
 
@@ -36,7 +36,7 @@ export default function RoomPage({ params }: RoomPageProps) {
   const [isHost, setIsHost] = useState(false);
   const [usersInRoom, setUsersInRoom] = useState<User[]>([]);
   const [roomJoined, setRoomJoined] = useState(false);
-  const [isLoading, setIsLoading] = useState(true); // True initially until session check or join attempt
+  const [isLoading, setIsLoading] = useState(true);
   const [joinError, setJoinError] = useState<string | null>(null);
   const [passwordAttempt, setPasswordAttempt] = useState('');
   const [username, setUsername] = useState('');
@@ -45,14 +45,61 @@ export default function RoomPage({ params }: RoomPageProps) {
   const { toast } = useToast();
   const router = useRouter();
 
+  // Effect for initializing socket and setting up listeners
   useEffect(() => {
-    const storedPassword = sessionStorage.getItem('roomPasswordSyncStream');
-    const storedUsername = sessionStorage.getItem('roomUsernameSyncStream') || `User_${Math.random().toString(36).substring(2, 7)}`;
+    const storedUsername = sessionStorage.getItem('roomUsernameSyncStream');
+    if (storedUsername) {
+      setUsername(storedUsername);
+    } else {
+      // Should not happen if RoomEntryForm sets it, but as a fallback
+      const randomUser = `User_${Math.random().toString(36).substring(2, 7)}`;
+      setUsername(randomUser);
+      sessionStorage.setItem('roomUsernameSyncStream', randomUser);
+    }
     
-    setUsername(storedUsername); // Set username regardless
-
-    const newSocket = getSocket(); // Get or create socket instance
+    const newSocket = getSocket();
     setSocket(newSocket);
+
+    // Attempt to join room if password is in session storage
+    const storedPassword = sessionStorage.getItem('roomPasswordSyncStream');
+    if (storedPassword && roomId && storedUsername) {
+      if (newSocket.connected) {
+        newSocket.emit("join_room", { roomId, password: storedPassword, username: storedUsername });
+      } else {
+        newSocket.once('connect', () => {
+          newSocket.emit("join_room", { roomId, password: storedPassword, username: storedUsername });
+        });
+        if (!newSocket.active) newSocket.connect();
+      }
+    } else {
+      setIsLoading(false); // No password, show prompt
+    }
+
+    return () => {
+      // Clean up socket instance on component unmount, if desired
+      // but typically we might want to keep it alive across navigation within the app
+      // For this app, leaving the room page means disconnecting.
+      // disconnectSocket(); // This nullifies the shared instance. Server handles 'disconnect' event.
+      // If socket instance is shared globally, removing listeners specific to this room is enough.
+      if (newSocket) {
+        newSocket.off("room_joined");
+        newSocket.off("join_error");
+        newSocket.off("user_joined");
+        newSocket.off("user_left");
+        newSocket.off("promoted_to_host");
+        newSocket.off("new_host");
+        newSocket.off("video_selected");
+        newSocket.off("video_controlled");
+        newSocket.off("host_provide_sync_state");
+        newSocket.off("apply_host_sync_state");
+        newSocket.off("error_event");
+      }
+    };
+  }, [roomId]); // Only run once on mount for setup, roomId is stable after decode
+
+  // Effect for handling socket events - depends on `socket` and `isHost` state
+  useEffect(() => {
+    if (!socket) return;
 
     const handleRoomJoined = (data: { roomId: string; isHost: boolean; users: User[]; currentVideoUrl?: string; currentVideoFileName?: string }) => {
       toast({ title: "Joined Room", description: `Successfully joined ${data.roomId}. You are ${data.isHost ? 'the host' : 'a guest'}.` });
@@ -60,14 +107,12 @@ export default function RoomPage({ params }: RoomPageProps) {
       setIsHost(data.isHost);
       setUsersInRoom(data.users || []);
       if (data.currentVideoUrl) {
-        // If it's a blob URL AND I'm not the host, I can't play it.
-        // VideoPlayerWrapper will handle this.
         setVideoUrl(data.currentVideoUrl);
         setVideoFileName(data.currentVideoFileName || 'Shared Video');
       }
       setIsLoading(false);
       setJoinError(null);
-      if (storedPassword) sessionStorage.removeItem('roomPasswordSyncStream'); // Clear password after successful use
+      sessionStorage.removeItem('roomPasswordSyncStream');
     };
 
     const handleJoinError = (errorMsg: string) => {
@@ -75,8 +120,7 @@ export default function RoomPage({ params }: RoomPageProps) {
       setJoinError(errorMsg);
       setIsLoading(false);
       setRoomJoined(false);
-      // If password was from session and failed, clear it so user is prompted
-      if (storedPassword) sessionStorage.removeItem('roomPasswordSyncStream');
+      sessionStorage.removeItem('roomPasswordSyncStream'); // Clear failed password attempt
     };
 
     const handleUserJoined = (data: { userId: string; username: string; users: User[] }) => {
@@ -90,14 +134,15 @@ export default function RoomPage({ params }: RoomPageProps) {
     };
     
     const handlePromotedToHost = () => {
-        toast({ title: "You are now the host!" });
-        setIsHost(true);
+      toast({ title: "You are now the host!" });
+      setIsHost(true);
     };
 
     const handleNewHost = (data: { hostSocketId: string; hostUsername: string; }) => {
-      if (data.hostSocketId !== newSocket?.id) { 
+      if (data.hostSocketId !== socket?.id) { 
         toast({ title: "New Host", description: `${data.hostUsername} is now the host.` });
       }
+      // isHost state will be updated by "promoted_to_host" if this client is the new host
     };
 
     const handleVideoSelected = ({ videoUrl: newVideoUrl, fileName: newFileName }: { videoUrl: string, fileName: string}) => {
@@ -105,91 +150,73 @@ export default function RoomPage({ params }: RoomPageProps) {
       setVideoFileName(newFileName);
       toast({ title: "Video Changed", description: `Now playing: ${newFileName}` });
       if (!isHost && videoPlayerRef.current) {
-          // If it's a blob URL from host, non-host can't play. PlayerWrapper handles this.
-          // If it's a public URL, non-host player will load it.
-          // We might want to force seek to 0 and play/pause based on host's current state.
-          // For simplicity, let video player handle loading. User can request resync.
-          // videoPlayerRef.current.seekTo(0, 'seconds');
+        // If non-host, player will load it. Then request sync to ensure correct state.
+        // Or, host_sync_state_update might be sent by host immediately after video_select
+        socket.emit("request_resync", { roomId }); 
+      } else if (isHost && videoPlayerRef.current) {
+        // Host selected, may want to immediately broadcast their current state
+        // (e.g., if they intend for it to start playing or paused at 0)
+         const hostState = videoPlayerRef.current.getCurrentState();
+         socket.emit("host_sync_state_update", { roomId, state: { ...hostState, time: 0, playing: hostState.playing} }); // Reset time for new video
       }
     };
     
     const handleVideoControlled = (control: { type: 'play' | 'pause' | 'seek', time?: number }) => {
-        if (!isHost && videoPlayerRef.current) { 
-            if (control.type === 'play') videoPlayerRef.current.play();
-            else if (control.type === 'pause') videoPlayerRef.current.pause();
-            else if (control.type === 'seek' && control.time !== undefined) videoPlayerRef.current.seekTo(control.time, 'seconds');
-        }
+      if (!isHost && videoPlayerRef.current) { 
+        if (control.type === 'play') videoPlayerRef.current.play();
+        else if (control.type === 'pause') videoPlayerRef.current.pause();
+        else if (control.type === 'seek' && control.time !== undefined) videoPlayerRef.current.seekTo(control.time, 'seconds');
+      }
     };
 
     const handleHostProvideSyncState = ({ requesterSocketId }: {requesterSocketId: string}) => {
-        if (isHost && videoPlayerRef.current && newSocket) {
-            const currentState = videoPlayerRef.current.getCurrentState();
-            newSocket.emit("host_sync_state_update", { 
-                roomId, 
-                state: currentState,
-                targetSocketId: requesterSocketId 
-            });
-        }
+      if (isHost && videoPlayerRef.current && socket) {
+        const currentState = videoPlayerRef.current.getCurrentState();
+        socket.emit("host_sync_state_update", { 
+          roomId, 
+          state: currentState,
+          targetSocketId: requesterSocketId 
+        });
+      }
     };
 
     const handleApplyHostSyncState = (state: { time: number; playing: boolean }) => {
-        if (!isHost && videoPlayerRef.current) {
-            toast({ title: "Syncing with host..."});
-            videoPlayerRef.current.applyState(state);
-        }
+      if (!isHost && videoPlayerRef.current) {
+        toast({ title: "Syncing with host..."});
+        videoPlayerRef.current.applyState(state);
+      }
     };
     
     const handleErrorEvent = (errorMessage: string) => {
-        toast({ title: "Error", description: errorMessage, variant: "destructive" });
+      toast({ title: "Error", description: errorMessage, variant: "destructive" });
     };
 
-    if (newSocket) {
-        newSocket.on("room_joined", handleRoomJoined);
-        newSocket.on("join_error", handleJoinError);
-        newSocket.on("user_joined", handleUserJoined);
-        newSocket.on("user_left", handleUserLeft);
-        newSocket.on("promoted_to_host", handlePromotedToHost);
-        newSocket.on("new_host", handleNewHost);
-        newSocket.on("video_selected", handleVideoSelected);
-        newSocket.on("video_controlled", handleVideoControlled);
-        newSocket.on("host_provide_sync_state", handleHostProvideSyncState);
-        newSocket.on("apply_host_sync_state", handleApplyHostSyncState);
-        newSocket.on("error_event", handleErrorEvent);
-
-        if (storedPassword && roomId && storedUsername) {
-          if (newSocket.connected) {
-            newSocket.emit("join_room", { roomId, password: storedPassword, username: storedUsername });
-          } else {
-            newSocket.once('connect', () => { // Wait for connection if not already connected
-                newSocket.emit("join_room", { roomId, password: storedPassword, username: storedUsername });
-            });
-          }
-        } else if (roomId && storedUsername) {
-          setIsLoading(false); // No password in session, show password prompt
-        }
-    }
+    socket.on("room_joined", handleRoomJoined);
+    socket.on("join_error", handleJoinError);
+    socket.on("user_joined", handleUserJoined);
+    socket.on("user_left", handleUserLeft);
+    socket.on("promoted_to_host", handlePromotedToHost);
+    socket.on("new_host", handleNewHost);
+    socket.on("video_selected", handleVideoSelected);
+    socket.on("video_controlled", handleVideoControlled);
+    socket.on("host_provide_sync_state", handleHostProvideSyncState);
+    socket.on("apply_host_sync_state", handleApplyHostSyncState);
+    socket.on("error_event", handleErrorEvent);
 
     return () => {
-      if (newSocket) {
-        newSocket.off("room_joined", handleRoomJoined);
-        newSocket.off("join_error", handleJoinError);
-        newSocket.off("user_joined", handleUserJoined);
-        newSocket.off("user_left", handleUserLeft);
-        newSocket.off("promoted_to_host", handlePromotedToHost);
-        newSocket.off("new_host", handleNewHost);
-        newSocket.off("video_selected", handleVideoSelected);
-        newSocket.off("video_controlled", handleVideoControlled);
-        newSocket.off("host_provide_sync_state", handleHostProvideSyncState);
-        newSocket.off("apply_host_sync_state", handleApplyHostSyncState);
-        newSocket.off("error_event", handleErrorEvent);
-        // Don't call disconnectSocket() here as it nullifies the shared instance.
-        // The server handles user leaving the room on socket disconnect.
-        if (newSocket.connected) {
-          // newSocket.emit("leave_room", { roomId }); // Server handles this on disconnect event
-        }
-      }
+      socket.off("room_joined", handleRoomJoined);
+      socket.off("join_error", handleJoinError);
+      socket.off("user_joined", handleUserJoined);
+      socket.off("user_left", handleUserLeft);
+      socket.off("promoted_to_host", handlePromotedToHost);
+      socket.off("new_host", handleNewHost);
+      socket.off("video_selected", handleVideoSelected);
+      socket.off("video_controlled", handleVideoControlled);
+      socket.off("host_provide_sync_state", handleHostProvideSyncState);
+      socket.off("apply_host_sync_state", handleApplyHostSyncState);
+      socket.off("error_event", handleErrorEvent);
     };
-  }, [roomId, toast, router, isHost]); // Added isHost due to its use in handleVideoSelected
+  }, [socket, toast, router, isHost, roomId]); // Dependencies for re-registering handlers if they change
 
   const handlePasswordSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -197,33 +224,46 @@ export default function RoomPage({ params }: RoomPageProps) {
       toast({ title: "Password Required", description: "Please enter the room password.", variant: "destructive"});
       return;
     }
+    if (!username) {
+      toast({ title: "Username Error", description: "Username not set. Please refresh.", variant: "destructive"});
+      return;
+    }
     setIsLoading(true);
     setJoinError(null);
-    if(socket && username) {
+    if(socket) {
       if (socket.connected) {
         socket.emit("join_room", { roomId, password: passwordAttempt, username });
       } else {
         socket.once('connect', () => {
-            socket.emit("join_room", { roomId, password: passwordAttempt, username });
+          socket.emit("join_room", { roomId, password: passwordAttempt, username });
         });
-        socket.connect(); // Attempt to connect if not already
+        if(!socket.active) socket.connect();
       }
     } else {
-        toast({ title: "Connection Error", description: "Cannot connect to server. Please refresh.", variant: "destructive"});
-        setIsLoading(false);
+      toast({ title: "Connection Error", description: "Cannot connect to server. Please refresh.", variant: "destructive"});
+      setIsLoading(false);
     }
   };
 
   const handleVideoSelectByHost = (url: string, fileName: string) => {
     if (isHost && socket && roomJoined) {
-      // For local Blob URLs, they are not transferable directly for playback by others.
-      // The server is notified of the filename, and this host's player will use the blob URL.
-      // Other clients will see "Host is playing X" but cannot play the blob. VideoPlayerWrapper handles this.
-      // If 'url' was a public URL, it would be playable by all.
       setVideoUrl(url); 
       setVideoFileName(fileName);
-      socket.emit("video_select", { roomId, videoUrl: url, fileName }); // Send blob URL and filename
+      // For local blob URLs, this URL itself is not useful to others.
+      // For public URLs, it is. Server stores what it's given.
+      socket.emit("video_select", { roomId, videoUrl: url, fileName }); 
       toast({title: "Broadcasting Video", description: `You started playing ${fileName}.`});
+      // After selecting, host might want to immediately sync its state (e.g. paused at 0)
+      if (videoPlayerRef.current) {
+        // Give player a moment to potentially load if it's a new URL
+        setTimeout(() => {
+            if(videoPlayerRef.current) {
+                const hostState = videoPlayerRef.current.getCurrentState();
+                 // For a new video, typically start at 0, and host decides if playing or paused.
+                socket.emit("host_sync_state_update", { roomId, state: { ...hostState, time:0 } });
+            }
+        }, 200)
+      }
     }
   };
   
@@ -234,22 +274,22 @@ export default function RoomPage({ params }: RoomPageProps) {
   };
 
   const requestResyncWithHost = () => {
-      if (socket && !isHost && roomJoined) {
-          socket.emit("request_resync", { roomId });
-          toast({ title: "Requesting Sync", description: "Asking host for current video state."});
-      }
+    if (socket && !isHost && roomJoined) {
+      socket.emit("request_resync", { roomId });
+      toast({ title: "Requesting Sync", description: "Asking host for current video state."});
+    }
   };
 
   const leaveRoom = () => {
     if (socket) {
-        socket.disconnect(); // This will trigger 'disconnect' on server, cleaning up the room
+      socket.disconnect(); 
     }
-    sessionStorage.removeItem('roomPasswordSyncStream');
-    sessionStorage.removeItem('roomUsernameSyncStream'); // Optionally clear username too
+    // sessionStorage.removeItem('roomPasswordSyncStream'); // Already cleared on join
+    // sessionStorage.removeItem('roomUsernameSyncStream'); // Keep username for convenience
     router.push('/');
   };
 
-  if (isLoading && !joinError) { // Show loading only if not already in an error state that requires user input
+  if (isLoading && !joinError) {
     return (
       <div className="flex flex-col items-center justify-center h-full min-h-[calc(100vh-10rem)]">
         <Loader2 className="h-12 w-12 animate-spin text-primary mb-4" />
@@ -265,11 +305,23 @@ export default function RoomPage({ params }: RoomPageProps) {
           <CardHeader>
             <CardTitle>Join Room: {roomId}</CardTitle>
             <CardDescription>
-              {joinError ? joinError : "Enter the password for this room."}
+              {joinError ? (
+                <span className="text-destructive flex items-center gap-1"><AlertTriangle className="h-4 w-4" />{joinError}</span>
+              ): "Enter the password for this room."}
             </CardDescription>
           </CardHeader>
           <form onSubmit={handlePasswordSubmit}>
             <CardContent className="space-y-4">
+              <div>
+                <Label htmlFor="username-display" className="text-sm text-muted-foreground">Your Username (auto-assigned)</Label>
+                <Input 
+                  id="username-display" 
+                  type="text" 
+                  value={username}
+                  readOnly
+                  className="bg-muted/50"
+                />
+              </div>
               <div>
                 <Label htmlFor="room-password">Password</Label>
                 <Input 
@@ -281,7 +333,6 @@ export default function RoomPage({ params }: RoomPageProps) {
                   required
                   aria-describedby="password-error"
                 />
-                {joinError && <p id="password-error" className="text-sm text-destructive mt-1">{joinError}</p>}
               </div>
               <Button type="submit" className="w-full" disabled={isLoading}>
                 {isLoading ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}

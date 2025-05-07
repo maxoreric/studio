@@ -15,7 +15,7 @@ const ROOMS_DIR = path.join(__dirname, 'server_data', 'rooms');
 // In-memory store for rooms, acts as a cache.
 // Files are the source of truth for persisted room data.
 // rooms: { roomId: { users: Map<socketId, {username: string}>, password: 'pass', currentVideoUrl: null, currentVideoFileName: null, hostSocketId: null } }
-const rooms = {};
+const rooms = {}; // This will be populated from files or on room creation
 
 // Ensure rooms directory exists
 async function ensureRoomsDir() {
@@ -51,13 +51,13 @@ async function loadRoomData(roomId) {
   if (!roomId) return null;
   const filePath = path.join(ROOMS_DIR, `${roomId}.json`);
   try {
-    if ((await fs.stat(filePath)).isFile()) {
-      const data = await fs.readFile(filePath, 'utf-8');
-      const parsedData = JSON.parse(data);
-      // Convert users object back to Map
-      parsedData.users = new Map(Object.entries(parsedData.users || {}));
-      return parsedData;
-    }
+    // Check if file exists before attempting to read
+    await fs.access(filePath); // Throws error if file doesn't exist
+    const data = await fs.readFile(filePath, 'utf-8');
+    const parsedData = JSON.parse(data);
+    // Convert users object back to Map
+    parsedData.users = new Map(Object.entries(parsedData.users || {}));
+    return parsedData;
   } catch (error) {
     if (error.code !== 'ENOENT') { // ENOENT means file not found, which is fine for new rooms
       console.error(`Error loading room data for ${roomId}:`, error);
@@ -79,7 +79,6 @@ async function deleteRoomData(roomId) {
   }
 }
 
-
 app.prepare().then(async () => {
   await ensureRoomsDir();
 
@@ -97,168 +96,204 @@ app.prepare().then(async () => {
 
   io.on("connection", (socket) => {
     console.log("User connected:", socket.id);
-    let currentRoomId = null; 
+    let currentRoomIdForSocket = null; // Track room for this specific socket connection
 
     socket.on("join_room", async ({ roomId, password, username }) => {
-      roomId = decodeURIComponent(roomId);
-      currentRoomId = roomId; 
+      const decodedRoomId = decodeURIComponent(roomId);
       
-      let roomData = rooms[roomId] || await loadRoomData(roomId);
+      let roomData = rooms[decodedRoomId] || await loadRoomData(decodedRoomId);
 
-      if (roomData) { // Room exists (either in memory or loaded from file)
-        if (!rooms[roomId]) rooms[roomId] = roomData; // Cache if loaded from file
+      if (!username) {
+        socket.emit("join_error", "Username is required.");
+        return;
+      }
+
+      if (roomData) { // Room exists
+        if (!rooms[decodedRoomId]) rooms[decodedRoomId] = roomData; // Cache if loaded from file
 
         if (roomData.password !== password) {
           socket.emit("join_error", "Invalid password.");
-          currentRoomId = null; // Reset currentRoomId as join failed
           return;
         }
 
-        // Check if user is already in the room (e.g. reconnecting with same socket ID or different tab)
-        let existingUser = false;
-        for (const [id, userObj] of roomData.users.entries()) {
-            if (id === socket.id || userObj.username === username) {
-                existingUser = true;
-                // If socket.id is different but username matches, it's a new connection for same logical user.
-                // We might want to update socket.id or handle this as a "rejoin".
-                // For simplicity, if username matches, we'll update socket.id if it's different.
-                if (id !== socket.id && userObj.username === username) {
-                    roomData.users.delete(id); // Remove old entry
-                    roomData.users.set(socket.id, { username }); // Add new entry
-                    if (roomData.hostSocketId === id) roomData.hostSocketId = socket.id; // Update host if it was them
+        // Check if user with same username is already in the room but different socket
+        const existingUserWithSameName = Array.from(roomData.users.values()).find(u => u.username === username);
+        if (existingUserWithSameName && !roomData.users.has(socket.id)) {
+            // This logic could be refined, e.g., allow rejoin if socket ID changes but username is same.
+            // For simplicity, if a username conflict occurs with a *different* socket ID, deny entry.
+            // If it's the *same* socket ID trying to rejoin (e.g., after a brief disconnect), it might be handled by reconnect logic.
+            // Or if it's the same user opening a new tab, we need a strategy.
+            // Current approach: if username exists with different socket ID, and room is not full, it is effectively a new user.
+            // If username exists with *this* socket ID, it's a reconnect.
+        }
+
+
+        if (roomData.users.size >= 2 && !roomData.users.has(socket.id)) {
+          // Check if one of the users is this username trying to reconnect with a new socket ID
+          let canRejoin = false;
+          let oldSocketIdToReplace = null;
+          for (const [id, userObj] of roomData.users.entries()) {
+              if (userObj.username === username) {
+                  canRejoin = true;
+                  oldSocketIdToReplace = id;
+                  break;
+              }
+          }
+
+          if (canRejoin && oldSocketIdToReplace) {
+             if (oldSocketIdToReplace !== socket.id) {
+                roomData.users.delete(oldSocketIdToReplace);
+                if (roomData.hostSocketId === oldSocketIdToReplace) {
+                    roomData.hostSocketId = socket.id; // Update host if it was them
                 }
-                break;
-            }
+             } // else if oldSocketIdToReplace IS socket.id, they are already "in", no need to add again
+          } else {
+             socket.emit("join_error", "Room is full.");
+             return;
+          }
         }
         
-        if (!existingUser && roomData.users.size >= 2) {
-          socket.emit("join_error", "Room is full.");
-          currentRoomId = null;
-          return;
-        }
-
-        if (!existingUser) {
+        // Add user if not already present (covers new joins and rejoins with new socket ID)
+        if (!roomData.users.has(socket.id)) {
              roomData.users.set(socket.id, { username });
         }
-       
-        console.log(`${username} (${socket.id}) joined room ${roomId}`);
-        socket.join(roomId); // Join Socket.IO room
-        await saveRoomData(roomId, roomData);
+        currentRoomIdForSocket = decodedRoomId;
+        socket.join(decodedRoomId);
+        await saveRoomData(decodedRoomId, roomData);
 
+        console.log(`${username} (${socket.id}) joined room ${decodedRoomId}`);
         socket.emit("room_joined", { 
-          roomId, 
+          roomId: decodedRoomId, 
           isHost: socket.id === roomData.hostSocketId,
           currentVideoUrl: roomData.currentVideoUrl,
           currentVideoFileName: roomData.currentVideoFileName,
           users: Array.from(roomData.users.values()),
         });
-        // Notify other users in the room, only if this is a new user joining (not a re-join scenario handled above)
-        if (!existingUser) {
-            socket.to(roomId).emit("user_joined", { userId: socket.id, username, users: Array.from(roomData.users.values()) });
-        }
+        socket.to(decodedRoomId).emit("user_joined", { userId: socket.id, username, users: Array.from(roomData.users.values()) });
 
       } else { // Room doesn't exist, create it
-        rooms[roomId] = {
+        if (rooms[decodedRoomId]?.users?.size >= 2) { // Should not happen if roomData is null but check anyway
+             socket.emit("join_error", "Room is full (cannot create)."); // Or some other error
+             return;
+        }
+        rooms[decodedRoomId] = {
           users: new Map([[socket.id, { username }]]),
           password: password,
           currentVideoUrl: null,
           currentVideoFileName: null,
           hostSocketId: socket.id,
         };
-        console.log(`Room ${roomId} created by ${username} (${socket.id})`);
-        socket.join(roomId);
-        await saveRoomData(roomId, rooms[roomId]);
+        currentRoomIdForSocket = decodedRoomId;
+        socket.join(decodedRoomId);
+        await saveRoomData(decodedRoomId, rooms[decodedRoomId]);
 
+        console.log(`Room ${decodedRoomId} created by ${username} (${socket.id})`);
         socket.emit("room_joined", { 
-          roomId, 
+          roomId: decodedRoomId, 
           isHost: true, 
-          users: Array.from(rooms[roomId].users.values()),
-          currentVideoUrl: rooms[roomId].currentVideoUrl,
-          currentVideoFileName: rooms[roomId].currentVideoFileName,
+          users: Array.from(rooms[decodedRoomId].users.values()),
+          currentVideoUrl: rooms[decodedRoomId].currentVideoUrl,
+          currentVideoFileName: rooms[decodedRoomId].currentVideoFileName,
         });
       }
     });
 
     socket.on("send_message", ({ roomId, messageData }) => {
-      roomId = decodeURIComponent(roomId);
-      if (rooms[roomId] && rooms[roomId].users.has(socket.id)) {
-        io.to(roomId).emit("new_message", messageData);
+      const decodedRoomId = decodeURIComponent(roomId);
+      if (rooms[decodedRoomId] && rooms[decodedRoomId].users.has(socket.id)) {
+        // The messageData already includes the sender's username and socket ID (userId)
+        // We just need to broadcast it.
+        io.to(decodedRoomId).emit("new_message", messageData);
       }
     });
 
     socket.on("video_select", async ({ roomId, videoUrl, fileName }) => {
-      roomId = decodeURIComponent(roomId);
-      if (rooms[roomId] && rooms[roomId].hostSocketId === socket.id) {
-        rooms[roomId].currentVideoUrl = videoUrl; 
-        rooms[roomId].currentVideoFileName = fileName;
-        await saveRoomData(roomId, rooms[roomId]);
-        io.to(roomId).emit("video_selected", { videoUrl: videoUrl, fileName });
-        console.log(`Video selected in room ${roomId} by host ${socket.id}: ${fileName}`);
+      const decodedRoomId = decodeURIComponent(roomId);
+      if (rooms[decodedRoomId] && rooms[decodedRoomId].hostSocketId === socket.id) {
+        rooms[decodedRoomId].currentVideoUrl = videoUrl; 
+        rooms[decodedRoomId].currentVideoFileName = fileName;
+        await saveRoomData(decodedRoomId, rooms[decodedRoomId]);
+        io.to(decodedRoomId).emit("video_selected", { videoUrl: videoUrl, fileName });
+        console.log(`Video selected in room ${decodedRoomId} by host ${socket.id}: ${fileName}`);
       } else {
         socket.emit("error_event", "Only the host can select a video.");
       }
     });
 
     socket.on("video_control", ({ roomId, control }) => {
-      roomId = decodeURIComponent(roomId);
-      if (rooms[roomId] && rooms[roomId].hostSocketId === socket.id) {
-         socket.to(roomId).emit("video_controlled", control); 
+      const decodedRoomId = decodeURIComponent(roomId);
+      if (rooms[decodedRoomId] && rooms[decodedRoomId].hostSocketId === socket.id) {
+         // Broadcast to others, not back to the host who initiated it
+         socket.to(decodedRoomId).emit("video_controlled", control); 
       }
     });
     
     socket.on("request_resync", ({ roomId }) => {
-        roomId = decodeURIComponent(roomId);
-        if (rooms[roomId] && rooms[roomId].users.has(socket.id) && rooms[roomId].hostSocketId !== socket.id) {
-            if (rooms[roomId].hostSocketId) {
-                io.to(rooms[roomId].hostSocketId).emit("host_provide_sync_state", { requesterSocketId: socket.id });
+        const decodedRoomId = decodeURIComponent(roomId);
+        const room = rooms[decodedRoomId];
+        if (room && room.users.has(socket.id) && room.hostSocketId !== socket.id) {
+            if (room.hostSocketId) {
+                console.log(`Resync requested by ${socket.id} in room ${decodedRoomId}. Notifying host ${room.hostSocketId}`);
+                io.to(room.hostSocketId).emit("host_provide_sync_state", { requesterSocketId: socket.id });
             }
         }
     });
 
     socket.on("host_sync_state_update", ({ roomId, state, targetSocketId }) => {
-        roomId = decodeURIComponent(roomId);
-        if (rooms[roomId] && rooms[roomId].hostSocketId === socket.id) {
-            if (targetSocketId) {
+        const decodedRoomId = decodeURIComponent(roomId);
+        const room = rooms[decodedRoomId];
+        if (room && room.hostSocketId === socket.id) {
+            if (targetSocketId) { // Sync for a specific requester
                  io.to(targetSocketId).emit("apply_host_sync_state", state);
-            } else { 
-                rooms[roomId].users.forEach((userData, userSocketId) => {
+                 console.log(`Host ${socket.id} sent sync state to ${targetSocketId} in room ${decodedRoomId}`);
+            } else { // General sync (e.g., after new video selected)
+                // Broadcast to all *other* users
+                room.users.forEach((userData, userSocketId) => {
                     if (userSocketId !== socket.id) {
                         io.to(userSocketId).emit("apply_host_sync_state", state);
                     }
                 });
+                console.log(`Host ${socket.id} broadcast sync state to room ${decodedRoomId}`);
             }
         }
     });
 
     socket.on("disconnect", async () => {
       console.log("User disconnected:", socket.id);
-      if (currentRoomId && rooms[currentRoomId]) {
-        const room = rooms[currentRoomId];
+      // currentRoomIdForSocket should be set if the user successfully joined a room
+      if (currentRoomIdForSocket && rooms[currentRoomIdForSocket]) {
+        const room = rooms[currentRoomIdForSocket];
         const disconnectedUser = room.users.get(socket.id);
         room.users.delete(socket.id);
 
-        io.to(currentRoomId).emit("user_left", { userId: socket.id, username: disconnectedUser?.username, users: Array.from(room.users.values()) });
+        io.to(currentRoomIdForSocket).emit("user_left", { 
+            userId: socket.id, 
+            username: disconnectedUser?.username, 
+            users: Array.from(room.users.values()) 
+        });
 
         if (room.users.size === 0) {
-          console.log(`Room ${currentRoomId} is empty, deleting from memory and file.`);
-          delete rooms[currentRoomId];
-          await deleteRoomData(currentRoomId);
+          console.log(`Room ${currentRoomIdForSocket} is empty, deleting from memory and file.`);
+          delete rooms[currentRoomIdForSocket]; // Remove from in-memory cache
+          await deleteRoomData(currentRoomIdForSocket); // Remove from file
         } else {
-          if (socket.id === room.hostSocketId) {
+          if (socket.id === room.hostSocketId) { // If the host disconnected
+            // Promote the first user in the list to be the new host
             const newHostEntry = Array.from(room.users.entries())[0]; 
             if (newHostEntry) {
               room.hostSocketId = newHostEntry[0]; 
               const newHostUsername = newHostEntry[1].username; 
-              console.log(`Host left room ${currentRoomId}. New host: ${newHostUsername} (${room.hostSocketId})`);
-              io.to(room.hostSocketId).emit("promoted_to_host");
-              io.to(currentRoomId).emit("new_host", { hostSocketId: room.hostSocketId, hostUsername: newHostUsername });
+              console.log(`Host left room ${currentRoomIdForSocket}. New host: ${newHostUsername} (${room.hostSocketId})`);
+              io.to(room.hostSocketId).emit("promoted_to_host"); // Notify the new host they are promoted
+              // Notify everyone in the room about the new host
+              io.to(currentRoomIdForSocket).emit("new_host", { hostSocketId: room.hostSocketId, hostUsername: newHostUsername });
             }
           }
-          // Save updated user list or new host
-          await saveRoomData(currentRoomId, room);
+          // Save updated user list or new host information
+          await saveRoomData(currentRoomIdForSocket, room);
         }
       }
-      currentRoomId = null; // Clear for this socket instance
+      // currentRoomIdForSocket = null; // Clear for this socket instance's scope, though this var is local to `io.on('connection')`
     });
   });
 
