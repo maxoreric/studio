@@ -75,41 +75,77 @@ export function ChatInterface({ socket, roomId, username }: ChatInterfaceProps) 
   }, [isRecording, recordingStartTime]);
 
   useEffect(() => {
-    const currentMessageBlobUrls = messages
-      .filter(msg => msg.type === 'audio' && msg.audioUrl && msg.audioUrl.startsWith('blob:'))
-      .map(msg => msg.audioUrl!);
+    // Manage blob URLs for messages
+    const newBlobUrlsInMessages = new Set(
+      messages
+        .filter(msg => msg.type === 'audio' && msg.audioUrl?.startsWith('blob:'))
+        .map(msg => msg.audioUrl!)
+    );
 
-    // Cleanup for the preview recorder's blob URL
-    const currentRecordedAudioUrl = recordedAudioUrl;
+    const previousBlobUrlsInMessagesRef = useRef<Set<string>>(new Set());
+
+    // Revoke URLs that were in previousBlobUrlsInMessagesRef.current but are not in newBlobUrlsInMessages
+    previousBlobUrlsInMessagesRef.current.forEach(oldUrl => {
+      if (!newBlobUrlsInMessages.has(oldUrl)) {
+        URL.revokeObjectURL(oldUrl);
+      }
+    });
+    previousBlobUrlsInMessagesRef.current = newBlobUrlsInMessages;
+
+    // Manage blob URL for recordedAudioUrl (preview)
+    const previousRecordedAudioUrlRef = useRef<string | null>(null);
+    if (
+      previousRecordedAudioUrlRef.current &&
+      previousRecordedAudioUrlRef.current !== recordedAudioUrl && // It changed
+      previousRecordedAudioUrlRef.current.startsWith('blob:')    // And old one was a blob
+    ) {
+      URL.revokeObjectURL(previousRecordedAudioUrlRef.current);
+    }
+    previousRecordedAudioUrlRef.current = recordedAudioUrl;
+
 
     return () => {
-      currentMessageBlobUrls.forEach(url => URL.revokeObjectURL(url));
-      if (currentRecordedAudioUrl && currentRecordedAudioUrl.startsWith('blob:')) {
-        URL.revokeObjectURL(currentRecordedAudioUrl);
+      // On component unmount, revoke all remaining blob URLs
+      previousBlobUrlsInMessagesRef.current.forEach(url => URL.revokeObjectURL(url));
+      if (previousRecordedAudioUrlRef.current && previousRecordedAudioUrlRef.current.startsWith('blob:')) {
+        URL.revokeObjectURL(previousRecordedAudioUrlRef.current);
       }
     };
-  }, [messages, recordedAudioUrl]); // recordedAudioUrl added
+  }, [messages, recordedAudioUrl]);
+
 
   useEffect(() => {
     if (!socket) return;
 
     const handleNewMessage = async (messageData: Message) => {
-      let processedMessage = { ...messageData, timestamp: new Date(messageData.timestamp) };
+      const baseProcessedMessage = { ...messageData, timestamp: new Date(messageData.timestamp) };
 
-      if (processedMessage.type === 'audio' && processedMessage.audioDataUri) {
+      if (baseProcessedMessage.type === 'audio' && baseProcessedMessage.audioDataUri) {
+        const dataUri = baseProcessedMessage.audioDataUri;
+        // Keep mimeType, remove dataUri from the object that will be spread into state
+        const mimeType = baseProcessedMessage.audioMimeType;
+        delete baseProcessedMessage.audioDataUri; 
+        
         try {
-          const blob = await (await fetch(processedMessage.audioDataUri)).blob();
+          const blob = await (await fetch(dataUri)).blob();
           const localAudioUrl = URL.createObjectURL(blob);
-          processedMessage.audioUrl = localAudioUrl;
-          delete processedMessage.audioDataUri; // No longer needed after conversion
+          
+          setMessages((prevMessages) => [...prevMessages, {
+            ...baseProcessedMessage,
+            audioUrl: localAudioUrl,
+            audioMimeType: mimeType // Ensure mimeType is set
+          }]);
         } catch (error) {
           console.error("Error processing audio data URI:", error);
           toast({ title: "Audio Error", description: "Could not process received voice message.", variant: "destructive" });
-          // Fallback: message will be added without a playable audioUrl if conversion fails
-          processedMessage.audioUrl = undefined; 
+          setMessages((prevMessages) => [...prevMessages, {
+            ...baseProcessedMessage, // audioUrl will be undefined, audioMimeType from original data
+             audioMimeType: mimeType
+          }]);
         }
+      } else {
+        setMessages((prevMessages) => [...prevMessages, baseProcessedMessage]);
       }
-      setMessages((prevMessages) => [...prevMessages, processedMessage]);
     };
 
     socket.on('new_message', handleNewMessage);
@@ -139,7 +175,7 @@ export function ChatInterface({ socket, roomId, username }: ChatInterfaceProps) 
   };
 
   const startRecording = async () => {
-    if (recordedAudioUrl) { // Clean up previous preview URL if any
+    if (recordedAudioUrl) { 
         URL.revokeObjectURL(recordedAudioUrl);
         setRecordedAudioUrl(null);
     }
@@ -149,12 +185,17 @@ export function ChatInterface({ socket, roomId, username }: ChatInterfaceProps) 
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const mimeType = MediaRecorder.isTypeSupported('audio/webm; codecs=opus') 
                          ? 'audio/webm; codecs=opus' 
-                         : MediaRecorder.isTypeSupported('audio/mp4') // iOS Safari prefers mp4
+                         : MediaRecorder.isTypeSupported('audio/mp4') 
                            ? 'audio/mp4' 
                            : MediaRecorder.isTypeSupported('audio/webm') 
                              ? 'audio/webm'
-                             : 'audio/ogg; codecs=opus';
+                             : 'audio/ogg; codecs=opus'; // Fallback, less common
 
+      if (!mimeType.startsWith('audio/')) { // Should not happen with above fallbacks
+          toast({ title: "Recording Error", description: "No supported audio format found for recording.", variant: "destructive" });
+          return;
+      }
+      
       mediaRecorderRef.current = new MediaRecorder(stream, { mimeType });
       mediaRecorderRef.current.ondataavailable = (event) => {
         if (event.data.size > 0) setAudioChunks((prev) => [...prev, event.data]);
@@ -172,7 +213,7 @@ export function ChatInterface({ socket, roomId, username }: ChatInterfaceProps) 
       console.error("Error accessing microphone:", err);
       toast({
         title: "Microphone Error",
-        description: `Could not access microphone. Error: ${(err as Error).message}`,
+        description: `Could not access microphone. ${(err as Error).message}`,
         variant: "destructive",
       });
     }
@@ -182,15 +223,16 @@ export function ChatInterface({ socket, roomId, username }: ChatInterfaceProps) 
     if (mediaRecorderRef.current && isRecording) {
       mediaRecorderRef.current.stop();
       setIsRecording(false); 
+      // The actual creation of recordedAudioUrl will happen in the useEffect watching [isRecording, audioChunks]
     }
   };
 
-  useEffect(() => { 
+ useEffect(() => { 
     if (!isRecording && audioChunks.length > 0) {
-      const mimeType = mediaRecorderRef.current?.mimeType || 'audio/webm';
+      const mimeType = mediaRecorderRef.current?.mimeType || 'audio/webm'; // Default if somehow not set
       const audioBlob = new Blob(audioChunks, { type: mimeType });
       const newAudioUrl = URL.createObjectURL(audioBlob);
-      setRecordedAudioUrl(newAudioUrl); // This URL is for the preview player
+      setRecordedAudioUrl(newAudioUrl);
       toast({ title: "Recording stopped", description: "Preview or send your voice message." });
     }
   }, [isRecording, audioChunks, toast]);
@@ -210,7 +252,6 @@ export function ChatInterface({ socket, roomId, username }: ChatInterfaceProps) 
     const mimeType = mediaRecorderRef.current?.mimeType || 'audio/webm';
     const audioBlob = new Blob(audioChunks, { type: mimeType });
 
-    // Convert blob to data URI for sending
     const reader = new FileReader();
     reader.readAsDataURL(audioBlob);
     reader.onloadend = () => {
@@ -223,18 +264,14 @@ export function ChatInterface({ socket, roomId, username }: ChatInterfaceProps) 
         timestamp: new Date(),
         avatar: `https://picsum.photos/seed/${username}-audio/40/40`,
         type: 'audio',
-        audioDataUri: base64AudioData, // Send data URI
+        audioDataUri: base64AudioData, 
         audioMimeType: mimeType,
-        // audioUrl will be set by receiver (including sender) after processing audioDataUri
       };
       
       socket.emit('send_message', { roomId, messageData });
       
-      // Clear after sending
-      if (recordedAudioUrl && recordedAudioUrl.startsWith('blob:')) {
-         URL.revokeObjectURL(recordedAudioUrl); // Clean up the preview blob URL
-      }
-      setRecordedAudioUrl(null);
+      // Cleanup after sending. The useEffect for recordedAudioUrl will handle revoking.
+      setRecordedAudioUrl(null); // This will trigger the useEffect to revoke the old URL
       setAudioChunks([]); 
       setRecordingDuration(0);
       toast({title: "Voice message sent!"});
@@ -246,16 +283,15 @@ export function ChatInterface({ socket, roomId, username }: ChatInterfaceProps) 
   };
 
   const handleDiscardAudio = () => {
-    if (recordedAudioUrl && recordedAudioUrl.startsWith('blob:')) {
-        URL.revokeObjectURL(recordedAudioUrl);
-    }
-    setRecordedAudioUrl(null);
+    // Cleanup. The useEffect for recordedAudioUrl will handle revoking.
+    setRecordedAudioUrl(null); // This will trigger the useEffect to revoke the old URL
     setAudioChunks([]); 
     if (isRecording) { 
         mediaRecorderRef.current?.stop(); 
         setIsRecording(false);
     }
     setRecordingDuration(0);
+    // Ensure media stream tracks are stopped if they were live
     if (mediaRecorderRef.current && mediaRecorderRef.current.stream) {
        mediaRecorderRef.current.stream.getTracks().forEach(track => {
         if (track.readyState === 'live') track.stop();
@@ -269,10 +305,6 @@ export function ChatInterface({ socket, roomId, username }: ChatInterfaceProps) 
       toast({ title: "No messages to export." });
       return;
     }
-    // For export, audioDataUri would be more portable if we were storing it long-term,
-    // but since we only use it for transport and convert to blob URLs for playback,
-    // exported audioUrl will be blob URLs which are only valid in the current session.
-    // For a real export, audio should be uploaded/stored and permanent URLs used.
     const serializableMessages = messages.map(msg => ({
       user: msg.user,
       userId: msg.userId,
@@ -280,8 +312,6 @@ export function ChatInterface({ socket, roomId, username }: ChatInterfaceProps) 
       type: msg.type,
       text: msg.text,
       audioMimeType: msg.type === 'audio' ? msg.audioMimeType : undefined,
-      // Note: audioUrl here will be a blob URL, not useful outside the session.
-      // For true export, audioDataUri or a permanent link would be needed.
       audioPresent: msg.type === 'audio' && !!msg.audioUrl 
     }));
 
@@ -315,7 +345,7 @@ export function ChatInterface({ socket, roomId, username }: ChatInterfaceProps) 
       );
     }
 
-    if (recordedAudioUrl) { // This is the preview player for the sender before sending
+    if (recordedAudioUrl) {
       return (
         <div className="flex flex-col items-center gap-2 w-full">
           <AudioPlayer src={recordedAudioUrl} mimeType={mediaRecorderRef.current?.mimeType || 'audio/webm'} />
