@@ -1,0 +1,164 @@
+/* client/src/App.css */
+body {
+  font-family: sans-serif;
+  margin: 0;
+  background-color: #f0f0f0;
+  color: #333;
+}
+
+.App {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh; /* Ensure it takes at least full viewport height */
+  max-width: 1200px;
+  margin: 0 auto;
+  background-color: #fff;
+  box-shadow: 0 0 10px rgba(0,0,0,0.1);
+}
+
+.App-header {
+  background-color: #282c34;
+  padding: 15px 20px;
+  color: white;
+  text-align: center;
+}
+.App-header h1 {
+  margin: 0;
+  font-size: 1.5em;
+}
+
+.controls {
+  padding: 15px;
+  text-align: center;
+  border-bottom: 1px solid #eee;
+}
+.controls input[type="file"] {
+  padding: 8px;
+}
+
+.main-content {
+  display: flex;
+  flex-grow: 1; /* Allows this section to fill available space */
+  /* For smaller screens, stack them */
+  flex-direction: column;
+}
+
+@media (min-width: 768px) { /* On larger screens, side-by-side */
+  .main-content {
+    flex-direction: row;
+  }
+}
+
+.video-section {
+  flex: 3; /* Takes more space on larger screens */
+  display: flex; /* Needed for ReactPlayer to fill height potentially */
+  flex-direction: column;
+  background-color: #000;
+  position: relative; /* For potential Danmaku overlay */
+  min-height: 300px; /* Minimum height for video area */
+}
+.video-section .react-player__wrapper { /* Target ReactPlayer's wrapper */
+    position: relative;
+    padding-top: 56.25%; /* 16:9 Aspect Ratio */
+    width: 100%;
+    height: auto; /* Let padding-top define height */
+}
+.video-section .react-player__wrapper > div { /* The actual player div */
+    position: absolute !important; /* Override inline styles */
+    top: 0 !important;
+    left: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+}
+.no-video-selected {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  min-height: 200px;
+  color: #ccc;
+  font-size: 1.2em;
+  text-align: center;
+}
+
+.chat-section {
+  flex: 1; /* Takes less space on larger screens */
+  display: flex;
+  flex-direction: column;
+  padding: 15px;
+  background-color: #f9f9f9;
+  border-top: 1px solid #ddd; /* Border for stacked view */
+  min-height: 200px; /* Minimum height for chat area */
+  overflow-y: hidden; /* Prevent double scrollbars if messages-list handles its own */
+}
+ @media (min-width: 768px) {
+  .chat-section {
+    border-top: none;
+    border-left: 1px solid #ddd; /* Border for side-by-side view */
+  }
+}
+
+
+.chat-section h3 {
+  margin-top: 0;
+  border-bottom: 1px solid #eee;
+  padding-bottom: 8px;
+  font-size: 1.2em;
+}
+
+.messages-list {
+  flex-grow: 1;
+  overflow-y: auto;
+  padding: 8px;
+  border: 1px solid #e0e0e0;
+  background-color: #fff;
+  margin-bottom: 10px;
+  min-height: 100px;
+}
+
+.message {
+  padding: 6px 10px;
+  margin-bottom: 6px;
+  border-radius: 5px;
+  word-wrap: break-word;
+  background-color: #e9e9eb;
+  max-width: 90%;
+}
+.message.my-message { /* Simple styling for own messages if needed later */
+  /* background-color: #dcf8c6; */
+  /* margin-left: auto; */
+}
+.message strong {
+  margin-right: 5px;
+}
+.message .timestamp {
+  font-size: 0.75em;
+  color: #777;
+  display: block;
+  text-align: right;
+  margin-top: 3px;
+}
+
+.message-input-form {
+  display: flex;
+}
+.message-input-form input {
+  flex-grow: 1;
+  padding: 10px;
+  border: 1px solid #ccc;
+  border-radius: 4px 0 0 4px;
+  font-size: 1em;
+}
+.message-input-form button {
+  padding: 10px 15px;
+  background-color: #007bff;
+  color: white;
+  border: 1px solid #007bff;
+  border-left: none;
+  border-radius: 0 4px 4px 0;
+  cursor: pointer;
+  font-size: 1em;
+}
+.message-input-form button:hover {
+  background-color: #0056b3;
+}

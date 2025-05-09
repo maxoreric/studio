@@ -1,0 +1,31 @@
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pids/
+*.pid
+*.seed
+*.log
+*.out
+coverage/
+lerna-debug.log
+
+# Build Folders (React client)
+client/build/
+
+# Uploads folder (server) - usually you don't commit user-uploaded content
+server/uploads/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# PM2 files (if any are generated in project dir, usually in ~/.pm2)
+*.pm2.log
+ecosystem.config.js # If you create one later for pm2
+
+# OS generated files
+.DS_Store
+Thumbs.db
